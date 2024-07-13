@@ -1,0 +1,5 @@
+backup.log
+/backup_manual
+/backup_por_intervalo
+/backup_diario
+.env
