@@ -28,12 +28,11 @@ PG_HOST = os.getenv("PG_HOST")
 PG_PORT = os.getenv("PG_PORT")
 PG_USER = os.getenv("PG_USER")
 PG_PASSWORD = os.getenv("PG_PASSWORD")
-PG_DB_NAME = os.getenv("PG_DB_NAME")
 
 SSH_HOST = os.getenv("SSH_HOST")
 SSH_USER = os.getenv("SSH_USER")
 SSH_PASSWORD = os.getenv("SSH_PASSWORD")
-BACKUP_DIR = "/var/backups/postgresql"
+BACKUP_BASE_DIR = os.path.join(os.getcwd(), "backups", "postgresql")
 
 
 # Função para criar conexão SSH
@@ -46,26 +45,57 @@ def create_ssh_client(server, user, password):
     return client
 
 
-# Função para realizar backup
-def perform_backup(backup_name, local_backup_subdir):
-    local_backup_path = os.path.join(os.getcwd(), local_backup_subdir)
+# Função para listar todos os bancos de dados
+def list_databases():
+    try:
+        ssh = create_ssh_client(SSH_HOST, SSH_USER, SSH_PASSWORD)
+        command = f"PGPASSWORD='{PG_PASSWORD}' psql -U {PG_USER} -h {PG_HOST} -t -c 'SELECT datname FROM pg_database WHERE datistemplate = false;'"
+        stdin, stdout, stderr = ssh.exec_command(command)
+        exit_status = stdout.channel.recv_exit_status()
+
+        if exit_status != 0:
+            logging.error(f"Failed to list databases with exit status {exit_status}")
+            logging.error(stderr.read().decode())
+            return []
+
+        databases = stdout.read().decode().split()
+        ssh.close()
+        return databases
+    except Exception as e:
+        logging.error(f"Erro ao listar bancos de dados: {e}")
+        return []
+
+
+# Função para criar diretórios de backup no servidor remoto
+def create_remote_backup_dir(ssh, remote_path):
+    command = f"mkdir -p {remote_path}"
+    ssh.exec_command(command)
+
+
+# Função para realizar backup de todos os bancos de dados
+def perform_backup(db_name, backup_name, backup_subdir):
+    local_backup_path = os.path.join(BACKUP_BASE_DIR, db_name, backup_subdir)
     if not os.path.exists(local_backup_path):
         os.makedirs(local_backup_path)
 
     try:
         ssh = create_ssh_client(SSH_HOST, SSH_USER, SSH_PASSWORD)
-        backup_command = f"PGPASSWORD='{PG_PASSWORD}' pg_dump -U {PG_USER} -h {PG_HOST} -F c -b -v -f {BACKUP_DIR}/{backup_name} {PG_DB_NAME}"
-        logging.info(f"Executing backup command: {backup_command}")
+        remote_backup_path = f"/var/backups/postgresql/{db_name}/{backup_subdir}"
+        create_remote_backup_dir(ssh, remote_backup_path)
+        backup_command = f"PGPASSWORD='{PG_PASSWORD}' pg_dump -U {PG_USER} -h {PG_HOST} -F c -b -v -f {remote_backup_path}/{backup_name} {db_name}"
+        logging.info(f"Executing backup command for database {db_name}")
         stdin, stdout, stderr = ssh.exec_command(backup_command)
         exit_status = stdout.channel.recv_exit_status()
 
         if exit_status != 0:
-            logging.error(f"pg_dump failed with exit status {exit_status}")
+            logging.error(
+                f"pg_dump failed with exit status {exit_status} for database {db_name}"
+            )
             logging.error(stderr.read().decode())
             return
 
         scp = SCPClient(ssh.get_transport())
-        scp.get(f"{BACKUP_DIR}/{backup_name}", local_backup_path)
+        scp.get(f"{remote_backup_path}/{backup_name}", local_backup_path)
         scp.close()
         ssh.close()
 
@@ -77,8 +107,8 @@ def perform_backup(backup_name, local_backup_subdir):
 
 
 # Função para limpar backups antigos
-def clean_old_backups(local_backup_subdir, days_to_keep=4):
-    local_backup_path = os.path.join(os.getcwd(), local_backup_subdir)
+def clean_old_backups(db_name, backup_subdir, days_to_keep=4):
+    local_backup_path = os.path.join(BACKUP_BASE_DIR, db_name, backup_subdir)
     if not os.path.exists(local_backup_path):
         return
 
@@ -96,12 +126,14 @@ def clean_old_backups(local_backup_subdir, days_to_keep=4):
 
 # Funções para modos de operação
 def modo_manual():
-    backup_name = (
-        f"backup_{PG_DB_NAME}_{PG_USER}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.sql"
-    )
+    databases = list_databases()
     logging.info("Modo manual iniciado")
-    perform_backup(backup_name, "backup_manual")
-    clean_old_backups("backup_manual")
+    for db in databases:
+        backup_name = (
+            f"backup_{db}_{PG_USER}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.sql"
+        )
+        perform_backup(db, backup_name, "backup_manual")
+        clean_old_backups(db, "backup_manual")
     logging.info("Modo manual finalizado")
 
 
@@ -121,10 +153,14 @@ def modo_diario(hora):
     )
     time.sleep(delay)
     while True:
-        backup_name = f"backup_{PG_DB_NAME}_{PG_USER}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.sql"
+        databases = list_databases()
         logging.info("Modo diário iniciado")
-        perform_backup(backup_name, "backup_diario")
-        clean_old_backups("backup_diario")
+        for db in databases:
+            backup_name = (
+                f"backup_{db}_{PG_USER}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.sql"
+            )
+            perform_backup(db, backup_name, "backup_diario")
+            clean_old_backups(db, "backup_diario")
         logging.info("Modo diário finalizado")
         time.sleep(24 * 3600)
 
@@ -134,10 +170,14 @@ def modo_por_intervalo(intervalo):
     intervalo_segundos = horas * 3600 + minutos * 60
     logging.info(f"Backup agendado a cada {intervalo} horas")
     while True:
-        backup_name = f"backup_{PG_DB_NAME}_{PG_USER}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.sql"
+        databases = list_databases()
         logging.info("Modo por intervalo iniciado")
-        perform_backup(backup_name, "backup_por_intervalo")
-        clean_old_backups("backup_por_intervalo")
+        for db in databases:
+            backup_name = (
+                f"backup_{db}_{PG_USER}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.sql"
+            )
+            perform_backup(db, backup_name, "backup_por_intervalo")
+            clean_old_backups(db, "backup_por_intervalo")
         logging.info("Modo por intervalo finalizado")
         logging.info(f"Próximo backup em {timedelta(seconds=intervalo_segundos)}")
         time.sleep(intervalo_segundos)

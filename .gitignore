@@ -1,5 +1,3 @@
 Postgres-Backup-Manager.log
-/backup_manual
-/backup_por_intervalo
-/backup_diario
+/backups
 .env
