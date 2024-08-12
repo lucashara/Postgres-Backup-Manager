@@ -72,6 +72,23 @@ def create_remote_backup_dir(ssh, remote_path):
     ssh.exec_command(command)
 
 
+# Função para limpar backups antigos no servidor remoto
+def clean_remote_backups(ssh, remote_backup_path, days_to_keep=4):
+    try:
+        cutoff_date = (datetime.now() - timedelta(days=days_to_keep)).strftime(
+            "%Y-%m-%d"
+        )
+        command = (
+            f"find {remote_backup_path} -type f -mtime +{days_to_keep} -exec rm {{}} \;"
+        )
+        ssh.exec_command(command)
+        logging.info(
+            f"Backups antigos no diretório {remote_backup_path} foram removidos"
+        )
+    except Exception as e:
+        logging.error(f"Erro ao limpar backups antigos no servidor remoto: {e}")
+
+
 # Função para realizar backup de todos os bancos de dados
 def perform_backup(db_name, backup_name, backup_subdir):
     local_backup_path = os.path.join(BACKUP_BASE_DIR, db_name, backup_subdir)
@@ -97,6 +114,10 @@ def perform_backup(db_name, backup_name, backup_subdir):
         scp = SCPClient(ssh.get_transport())
         scp.get(f"{remote_backup_path}/{backup_name}", local_backup_path)
         scp.close()
+
+        # Limpeza dos backups antigos no servidor remoto
+        clean_remote_backups(ssh, remote_backup_path)
+
         ssh.close()
 
         logging.info(
